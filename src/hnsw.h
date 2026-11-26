@@ -435,6 +435,8 @@ typedef struct HnswSearchState
 
 typedef struct HnswScanOpaqueData
 {
+	bool		recheckOrderBy;
+	double		orderByLowerBound;
 	const		HnswTypeInfo *typeInfo;
 	bool		first;
 	List	   *w;

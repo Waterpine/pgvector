@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include "vecutils.h"
+
 #include <limits.h>
 
 #include "access/genam.h"
@@ -140,8 +142,12 @@ hnswbeginscan(Relation index, int nkeys, int norderbys)
 	double		maxMemory;
 
 	scan = RelationGetIndexScan(index, nkeys, norderbys);
+	/* The executor owns the reordering queue; the AM owns these arrays. */
+	scan->xs_orderbyvals = norderbys > 0 ? palloc_array_checked(Datum, norderbys) : NULL;
+	scan->xs_orderbynulls = norderbys > 0 ? palloc_array_checked(bool, norderbys) : NULL;
 
 	so = palloc_object(HnswScanOpaqueData);
+	so->orderByLowerBound = 0.0;
 	so->typeInfo = HnswGetTypeInfo(index);
 
 	/* Set support functions */
@@ -188,6 +194,14 @@ hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int no
 
 	if (orderbys && scan->numberOfOrderBys > 0)
 		memmove(scan->orderByData, orderbys, scan->numberOfOrderBys * sizeof(ScanKeyData));
+
+	/* Custom operator classes must not inherit an unproven distance bound. */
+	so->recheckOrderBy = scan->numberOfOrderBys > 0;
+	for (int i = 0; i < scan->numberOfOrderBys; i++)
+	{
+		if (!VectorIsCosineDistance(scan->orderByData[i].sk_func.fn_addr))
+			so->recheckOrderBy = false;
+	}
 }
 
 /*
@@ -317,7 +331,7 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
 
 		heaptid = &element->heaptids[--element->heaptidsLength];
 
-		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
+		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT && !so->recheckOrderBy)
 		{
 			if (sc->distance < so->previousDistance)
 				continue;
@@ -329,7 +343,21 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
 
 		scan->xs_heaptid = *heaptid;
 		scan->xs_recheck = false;
-		scan->xs_recheckorderby = false;
+		scan->xs_recheckorderby = so->recheckOrderBy;
+		if (so->recheckOrderBy)
+		{
+			/*
+			 * Normalized index keys are lossy, so their distance is not an
+			 * admissible bound on the original SQL distance.  Zero is a
+			 * conservative bound for built-in cosine distance (including
+			 * NaN, which PostgreSQL sorts after finite values).
+			 */
+			for (int i = 0; i < scan->numberOfOrderBys; i++)
+			{
+				scan->xs_orderbyvals[i] = Float8GetDatumFast(so->orderByLowerBound);
+				scan->xs_orderbynulls[i] = false;
+			}
+		}
 		return true;
 	}
 
@@ -347,6 +375,11 @@ hnswendscan(IndexScanDesc scan)
 
 	HnswEndSearchState(&so->searchState);
 	MemoryContextDelete(so->tmpCtx);
+
+	if (scan->xs_orderbyvals != NULL)
+		pfree(scan->xs_orderbyvals);
+	if (scan->xs_orderbynulls != NULL)
+		pfree(scan->xs_orderbynulls);
 
 	pfree(so);
 	scan->opaque = NULL;

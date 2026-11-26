@@ -74,3 +74,15 @@ VectorL1Distance(int dim, float *ax, float *bx)
 
 	return distance;
 }
+
+/* Only these built-in ORDER BY operators have the [0, 2] distance bound. */
+PGDLLEXPORT Datum cosine_distance(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum halfvec_cosine_distance(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum sparsevec_cosine_distance(PG_FUNCTION_ARGS);
+
+bool
+VectorIsCosineDistance(PGFunction function)
+{
+	return function == cosine_distance || function == halfvec_cosine_distance ||
+		function == sparsevec_cosine_distance;
+}

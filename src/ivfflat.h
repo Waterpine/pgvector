@@ -301,6 +301,8 @@ typedef struct IvfflatBinaryHeap
 
 typedef struct IvfflatScanOpaqueData
 {
+	bool		recheckOrderBy;
+	double		orderByLowerBound;
 	const		IvfflatTypeInfo *typeInfo;
 	int			probes;
 	int			maxProbes;

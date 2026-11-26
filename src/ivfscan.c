@@ -4,6 +4,8 @@
 
 #include "postgres.h"
 
+#include "vecutils.h"
+
 #include <float.h>
 
 #include "access/genam.h"
@@ -587,6 +589,9 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	MemoryContext oldCtx;
 
 	scan = RelationGetIndexScan(index, nkeys, norderbys);
+	/* The executor owns the reordering queue; the AM owns these arrays. */
+	scan->xs_orderbyvals = norderbys > 0 ? palloc_array_checked(Datum, norderbys) : NULL;
+	scan->xs_orderbynulls = norderbys > 0 ? palloc_array_checked(bool, norderbys) : NULL;
 
 	/* Get lists and dimensions from metapage */
 	IvfflatGetMetaPageInfo(index, &lists, &dimensions);
@@ -603,6 +608,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 		maxProbes = lists;
 
 	so = palloc_object(IvfflatScanOpaqueData);
+	so->orderByLowerBound = 0.0;
 	so->typeInfo = IvfflatGetTypeInfo(index);
 	so->first = true;
 	so->probes = probes;
@@ -666,6 +672,14 @@ ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int
 
 	if (orderbys && scan->numberOfOrderBys > 0)
 		memmove(scan->orderByData, orderbys, scan->numberOfOrderBys * sizeof(ScanKeyData));
+
+	/* Custom operator classes must not inherit an unproven distance bound. */
+	so->recheckOrderBy = scan->numberOfOrderBys > 0;
+	for (int i = 0; i < scan->numberOfOrderBys; i++)
+	{
+		if (!VectorIsCosineDistance(scan->orderByData[i].sk_func.fn_addr))
+			so->recheckOrderBy = false;
+	}
 }
 
 /*
@@ -718,7 +732,21 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
 	}
 
 	scan->xs_recheck = false;
-	scan->xs_recheckorderby = false;
+	scan->xs_recheckorderby = so->recheckOrderBy;
+	if (so->recheckOrderBy)
+	{
+		/*
+		 * Normalized index keys are lossy, so their distance is not an
+		 * admissible bound on the original SQL distance.  Zero is a
+		 * conservative bound for built-in cosine distance (including
+		 * NaN, which PostgreSQL sorts after finite values).
+		 */
+		for (int i = 0; i < scan->numberOfOrderBys; i++)
+		{
+			scan->xs_orderbyvals[i] = Float8GetDatumFast(so->orderByLowerBound);
+			scan->xs_orderbynulls[i] = false;
+		}
+	}
 	return true;
 }
 
@@ -739,6 +767,11 @@ ivfflatendscan(IndexScanDesc scan)
 #endif
 
 	MemoryContextDelete(so->tmpCtx);
+
+	if (scan->xs_orderbyvals != NULL)
+		pfree(scan->xs_orderbyvals);
+	if (scan->xs_orderbynulls != NULL)
+		pfree(scan->xs_orderbynulls);
 
 	pfree(so);
 	scan->opaque = NULL;
