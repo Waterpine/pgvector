@@ -129,6 +129,29 @@ HnswGetM(Relation index)
 }
 
 /*
+ * Limit levels using the aligned size of a neighbor tuple.  Subtract the
+ * two ground-layer connection groups in signed arithmetic, so an m that
+ * cannot fit even level zero does not wrap to the maximum level.
+ */
+int
+HnswGetMaxLevel(int m)
+{
+	Size		maxSize = MAXALIGN_DOWN(HNSW_MAX_SIZE);
+	int			maxLevel;
+
+	Assert(m >= HNSW_MIN_M && m <= HNSW_MAX_M);
+	maxLevel = (int) ((maxSize - offsetof(HnswNeighborTupleData, indextids)) / sizeof(ItemPointerData) / m) - 2;
+
+	if (maxLevel < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("m is too large for this block size"),
+				 errdetail("A level-zero neighbor tuple with m = %d does not fit in a %d-byte block.", m, BLCKSZ)));
+
+	return Min(maxLevel, 63);
+}
+
+/*
  * Get the size of the dynamic candidate list in the index
  */
 int
